@@ -1,0 +1,15 @@
+name: host
+on: [push, pull_request]
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable@v1
+        with: { components: rustfmt, clippy }
+      - run: cargo fmt --check
+        working-directory: openrdc-host
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: openrdc-host
+      - run: cargo test
+        working-directory: openrdc-host

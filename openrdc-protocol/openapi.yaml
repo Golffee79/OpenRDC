@@ -1,0 +1,120 @@
+openapi: 3.0.3
+info:
+  title: OpenRDC API
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: ok
+  /v1/system:
+    get:
+      security:
+        - bearer: []
+      responses:
+        '200':
+          description: system metadata
+  /v1/capabilities:
+    get:
+      security:
+        - bearer: []
+      responses:
+        '200':
+          description: granted capabilities
+  /v1/screen/capture:
+    post:
+      security:
+        - bearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                monitor_id: { type: string }
+                max_width: { type: integer, minimum: 320, maximum: 3840 }
+      responses:
+        '200':
+          description: frame
+  /v1/mouse/click:
+    post:
+      security:
+        - bearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClickRequest'
+      responses:
+        '200':
+          description: ok
+  /v1/keyboard/type:
+    post:
+      security:
+        - bearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TypeRequest'
+      responses:
+        '200':
+          description: ok
+  /v1/keyboard/press:
+    post:
+      security:
+        - bearer: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PressRequest'
+      responses:
+        '200':
+          description: ok
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  schemas:
+    ClickRequest:
+      type: object
+      required: [frame_id, x, y]
+      properties:
+        frame_id: { type: string, format: uuid }
+        x: { type: integer, minimum: 0 }
+        y: { type: integer, minimum: 0 }
+        button: { type: string, enum: [left, right, middle], default: left }
+    TypeRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 1024 }
+    PressRequest:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, minLength: 1, maxLength: 32 }
+        modifiers:
+          type: array
+          items: { type: string, enum: [ctrl, shift, alt] }
+          maxItems: 3
+        approval_id:
+          type: string
+          description: Reserved for M1 trusted approval flow. M0 servers MUST reject if present.
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable, request_id]
+          properties:
+            code:
+              type: string
+              enum: [unauthorized, forbidden_capability, bad_argument, approval_required, rate_limited, capture_failed, input_failed, internal, stale_frame]
+            message: { type: string }
+            retryable: { type: boolean }
+            request_id: { type: string, format: uuid }

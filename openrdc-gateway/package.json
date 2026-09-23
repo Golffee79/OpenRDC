@@ -1,0 +1,5 @@
+{"name": "openrdc-gateway", "version": "0.1.0", "license": "Apache-2.0", "type": "module",
+ "bin": {"openrdc-gateway": "dist/index.js"},
+ "scripts": {"build": "tsc", "start": "node dist/index.js", "test": "node --test test/*.test.js"},
+ "dependencies": {"@modelcontextprotocol/sdk": "1.30.0", "zod": "3.25.76"},
+ "devDependencies": {"typescript": "5.9.3", "@types/node": "20.19.43"}}

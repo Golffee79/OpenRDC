@@ -1,0 +1,24 @@
+[package]
+name = "openrdc-host"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+enigo = "0.6"
+x11rb = { version = "0.13", features = ["randr"] }
+image = "0.25"
+tower = { version = "0.4", features = ["limit"] }
+tower-http = { version = "0.5", features = ["limit"] }
+libc = "0.2"
+
+[dev-dependencies]
+axum-test = "15"
