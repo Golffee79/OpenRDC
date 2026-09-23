@@ -34,9 +34,16 @@ async fn main() {
     let port: u16 = arg("--port", "18789").parse().unwrap_or(18789);
     let caps_file = arg("--caps", "configs/host.capabilities.example.json");
     let audit_file = arg("--audit", "/tmp/openrdc-audit.jsonl");
-    let caps_text =
-        std::fs::read_to_string(&caps_file).unwrap_or_else(|_| r#"{"granted":[]}"#.into());
-    let caps = Capabilities::load_json(&caps_text).expect("bad capability file");
+    // Fail closed: an unreadable/invalid capability file must never boot a
+    // zero-grant host. Use an absolute --caps path under daemons whose cwd
+    // is not the repo (e.g. start-stop-daemon chdirs to /).
+    let caps = match Capabilities::load_file(PathBuf::from(&caps_file).as_path()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("refusing to start: capability file: {e}");
+            std::process::exit(1);
+        }
+    };
     let audit = Audit::open(PathBuf::from(&audit_file)).expect("audit open");
     // Token errors never include token material (see token::TokenError).
     let token_path = token::token_path();

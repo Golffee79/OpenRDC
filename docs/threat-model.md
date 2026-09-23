@@ -21,3 +21,12 @@ explicitly deferred. Operator behavior: treat repeated 500 "audit
 unavailable" responses as a stop-work signal — stop the host, fix storage,
 then restart. All deny/validation paths fail closed (500 before any action),
 so only one in-flight allow per failure onset can go unattributed.
+
+## Real-desktop focus race (M0.2 dogfood, mitigated in M1)
+
+On a live desktop, window focus can move between capture and input (focus
+steal by another app), so frame-space coordinates can land in the wrong
+window: the agent acts on pixels it did not observe. This is an input
+integrity threat, not just UX. M0 accepts it (Xvfb has no competing
+windows); M1 must add capture-time interaction context + pre-action
+context validation per roadmap. No sleeps or forced-refocus hacks.

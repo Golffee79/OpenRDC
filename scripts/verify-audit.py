@@ -18,6 +18,7 @@ for i, v in enumerate(recs, 1):
     blob = json.dumps(v.get("params_redacted", {}))
     assert "E2E-SECRET-TYPED-TEXT" not in blob, "typed text leaked into audit!"
     prev = v["hash"]
-for m in ("screen.capture", "mouse.click", "keyboard.type", "keyboard.press", "auth"):
+for m in ("screen.capture", "mouse.click", "keyboard.type", "keyboard.press"):
     assert m in methods, f"missing audit for {m}"
+# auth is optional: a healthy run may contain zero failed-auth attempts.
 print(f"records={len(recs)} links_ok=true methods={sorted(methods)} no_typed_text=true")
