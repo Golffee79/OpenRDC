@@ -228,6 +228,14 @@ async fn any_modifier_needs_dangerous_capability() {
             .await
             .assert_status_ok();
     }
+    // R3: deny records carry key AND modifiers.
+    let recs = audit_records(&audit);
+    let first = recs.first().unwrap();
+    assert_eq!(first["params_redacted"]["key"], "Tab");
+    assert_eq!(
+        first["params_redacted"]["modifiers"],
+        serde_json::json!(["alt"])
+    );
 }
 
 #[tokio::test]
@@ -322,14 +330,18 @@ async fn zero_size_frame_rejected() {
 }
 
 #[tokio::test]
-async fn oversized_body_rejected() {
-    let (s, _) = server(r#"{"granted":["keyboard.type"]}"#);
+async fn oversized_body_rejected_with_envelope_and_audit() {
+    let (s, audit) = server(r#"{"granted":["keyboard.type"]}"#);
     let r = s
         .post("/v1/keyboard/type")
         .add_header("authorization", "Bearer test-token")
         .text("x".repeat(70 * 1024))
         .await;
     r.assert_status(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    // Declared-length oversize uses the standard JSON envelope (R2).
+    let v: serde_json::Value = r.json();
+    assert_eq!(v["error"]["code"], "bad_argument");
+    assert_rid_audited(&audit, &v);
 }
 
 #[tokio::test]

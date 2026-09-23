@@ -5,6 +5,8 @@
 //! handler responds. Write/flush/fsync errors are returned to the caller —
 //! deny paths fail closed (500); allow paths report 500 after the action
 //! (action cannot be un-taken; the 500 + stderr line signal the gap).
+//! Operator: repeated 500 "audit unavailable" means stop the host and fix
+//! storage (see docs/threat-model.md "Act-then-audit window").
 //! Crash/power loss can still lose at most the in-flight record; a writer
 //! with filesystem access can truncate/regenerate the whole chain
 //! (external anchoring deferred to M2).

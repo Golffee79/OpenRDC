@@ -16,7 +16,6 @@ base64 = "0.22"
 enigo = "0.6"
 x11rb = { version = "0.13", features = ["randr"] }
 image = "0.25"
-tower = { version = "0.4", features = ["limit"] }
 tower-http = { version = "0.5", features = ["limit"] }
 libc = "0.2"
 

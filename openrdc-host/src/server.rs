@@ -39,6 +39,7 @@ async fn guard(State(s): State<Shared>, req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
     let rid = Uuid::new_v4().to_string();
+    let path = req.uri().path().to_string();
     let ok = req
         .headers()
         .get("authorization")
@@ -46,15 +47,19 @@ async fn guard(State(s): State<Shared>, req: Request, next: Next) -> Response {
         .map(|v| v == format!("Bearer {}", s.token))
         .unwrap_or(false);
     if !ok {
-        let _ = s
-            .audit
-            .record(&rid, "auth", json!({}), "deny", "unauthorized");
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "bad or missing token".into(),
-            false,
+        return audit_or_500(
+            &s,
             &rid,
+            "auth",
+            json!({}),
+            "unauthorized",
+            err(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "bad or missing token".into(),
+                false,
+                &rid,
+            ),
         );
     }
     if let Some(len) = req
@@ -64,23 +69,42 @@ async fn guard(State(s): State<Shared>, req: Request, next: Next) -> Response {
         .and_then(|v| v.parse::<u64>().ok())
     {
         if len > MAX_BODY_BYTES {
-            let _ = s.audit.record(
+            return audit_or_500(
+                &s,
                 &rid,
-                req.uri().path(),
+                &path,
                 json!({"content_length": len}),
-                "deny",
                 "body_too_large",
+                err(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "bad_argument",
+                    "body too large".into(),
+                    false,
+                    &rid,
+                ),
             );
-            return err(
+        }
+    }
+    let res = next.run(req).await;
+    if res.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        // R2: tower-http backstop fired (chunked/missing length). Convert the
+        // bare 413 into the audited JSON envelope with the same request_id.
+        return audit_or_500(
+            &s,
+            &rid,
+            &path,
+            json!({}),
+            "body_too_large",
+            err(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "bad_argument",
                 "body too large".into(),
                 false,
                 &rid,
-            );
-        }
+            ),
+        );
     }
-    next.run(req).await
+    res
 }
 
 fn rate_hit(slot: &Mutex<Vec<Instant>>, max: usize, window_ms: u64) -> bool {
@@ -92,6 +116,30 @@ fn rate_hit(slot: &Mutex<Vec<Instant>>, max: usize, window_ms: u64) -> bool {
     }
     v.push(now);
     true
+}
+
+/// R1: rejections with a fixed response shape. The audit write is explicit:
+/// on failure, log to stderr and escalate to 500 (same request_id) instead
+/// of silently discarding the error.
+fn audit_or_500(
+    s: &Shared,
+    rid: &str,
+    method: &str,
+    params: serde_json::Value,
+    reason: &str,
+    fallback: Response,
+) -> Response {
+    if s.audit.record(rid, method, params, "deny", reason).is_err() {
+        eprintln!("audit write failed for {method} (reason={reason})");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "audit unavailable".into(),
+            false,
+            rid,
+        );
+    }
+    fallback
 }
 
 /// Common deny path: audit first; if the audit itself fails, fail closed.
@@ -174,10 +222,13 @@ pub fn router(s: Shared) -> Router {
         .route("/v1/mouse/click", post(click))
         .route("/v1/keyboard/type", post(type_text))
         .route("/v1/keyboard/press", post(press))
-        .layer(middleware::from_fn_with_state(s.clone(), guard))
+        // Layer order: guard is outermost (added last). Declared oversize is
+        // rejected + audited in guard; tower-http backstops chunked bodies,
+        // whose 413s guard converts to the audited envelope on the way out.
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             MAX_BODY_BYTES as usize,
         ))
+        .layer(middleware::from_fn_with_state(s.clone(), guard))
         .with_state(s)
 }
 
@@ -207,15 +258,19 @@ async fn capture(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
         );
     }
     if !rate_hit(&s.capture_hits, 5, 1000) {
-        let _ = s
-            .audit
-            .record(&rid, "screen.capture", json!({}), "deny", "rate_limited");
-        return err(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "slow down".into(),
-            true,
+        return audit_or_500(
+            &s,
             &rid,
+            "screen.capture",
+            json!({}),
+            "rate_limited",
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "slow down".into(),
+                true,
+                &rid,
+            ),
         );
     }
     let v: serde_json::Value = if body.is_empty() {
@@ -246,10 +301,14 @@ async fn capture(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
     let raw = match s.screen.capture(monitor_id) {
         Ok(r) => r,
         Err(e) => {
-            let _ = s
-                .audit
-                .record(&rid, "screen.capture", json!({}), "deny", &e);
-            return err(StatusCode::BAD_GATEWAY, "capture_failed", e, true, &rid);
+            return audit_or_500(
+                &s,
+                &rid,
+                "screen.capture",
+                json!({}),
+                &e.clone(),
+                err(StatusCode::BAD_GATEWAY, "capture_failed", e, true, &rid),
+            );
         }
     };
     if raw.source_width == 0 || raw.source_height == 0 {
@@ -266,8 +325,27 @@ async fn capture(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
         (raw.source_width as f64 * scale).round() as u32,
         (raw.source_height as f64 * scale).round() as u32,
     );
-    let img: RgbaImage = RgbaImage::from_raw(raw.source_width, raw.source_height, raw.rgba)
-        .unwrap_or_else(|| RgbaImage::new(raw.source_width, raw.source_height));
+    let img: RgbaImage = match RgbaImage::from_raw(raw.source_width, raw.source_height, raw.rgba) {
+        Some(img) => img,
+        // Backend pixel data does not match its geometry: fail instead of
+        // serving a silently substituted blank image.
+        None => {
+            return audit_or_500(
+                &s,
+                &rid,
+                "screen.capture",
+                json!({"monitor_id": raw.monitor_id}),
+                "frame data mismatch",
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    "capture_failed",
+                    "frame data mismatch".into(),
+                    true,
+                    &rid,
+                ),
+            );
+        }
+    };
     let small = image::imageops::resize(&img, ow, oh, image::imageops::FilterType::Triangle);
     let mut png = Vec::new();
     let mut cur = std::io::Cursor::new(&mut png);
@@ -275,15 +353,19 @@ async fn capture(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
         .write_to(&mut cur, image::ImageFormat::Png)
         .is_err()
     {
-        let _ = s
-            .audit
-            .record(&rid, "screen.capture", json!({}), "deny", "encode failed");
-        return err(
-            StatusCode::BAD_GATEWAY,
-            "capture_failed",
-            "encode failed".into(),
-            true,
+        return audit_or_500(
+            &s,
             &rid,
+            "screen.capture",
+            json!({}),
+            "encode failed",
+            err(
+                StatusCode::BAD_GATEWAY,
+                "capture_failed",
+                "encode failed".into(),
+                true,
+                &rid,
+            ),
         );
     }
     let monitors: Vec<_> = s
@@ -385,35 +467,35 @@ async fn click(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
         );
     }
     if !rate_hit(&s.input_hits, 10, 1000) {
-        let _ = s.audit.record(
+        return audit_or_500(
+            &s,
             &rid,
             "mouse.click",
             json!({"frame_id": fid}),
-            "deny",
             "rate_limited",
-        );
-        return err(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "slow down".into(),
-            true,
-            &rid,
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "slow down".into(),
+                true,
+                &rid,
+            ),
         );
     }
     let Some(meta) = s.frames.get(fid) else {
-        let _ = s.audit.record(
+        return audit_or_500(
+            &s,
             &rid,
             "mouse.click",
             json!({"frame_id": fid}),
-            "deny",
             "stale_frame",
-        );
-        return err(
-            StatusCode::GONE,
-            "stale_frame",
-            "re-capture first".into(),
-            true,
-            &rid,
+            err(
+                StatusCode::GONE,
+                "stale_frame",
+                "re-capture first".into(),
+                true,
+                &rid,
+            ),
         );
     };
     let Some((nx, ny)) = FrameStore::to_native(&meta, x as u32, y as u32) else {
@@ -448,16 +530,14 @@ async fn click(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
             }
             Json(json!({"ok": true})).into_response()
         }
-        Err(e) => {
-            let _ = s.audit.record(
-                &rid,
-                "mouse.click",
-                json!({"frame_id": fid, "x": x, "y": y}),
-                "deny",
-                &e,
-            );
-            err(StatusCode::BAD_GATEWAY, "input_failed", e, false, &rid)
-        }
+        Err(e) => audit_or_500(
+            &s,
+            &rid,
+            "mouse.click",
+            json!({"frame_id": fid, "x": x, "y": y}),
+            &e.clone(),
+            err(StatusCode::BAD_GATEWAY, "input_failed", e, false, &rid),
+        ),
     }
 }
 
@@ -499,19 +579,19 @@ async fn type_text(State(s): State<Shared>, body: axum::body::Bytes) -> Response
         );
     }
     if !rate_hit(&s.input_hits, 10, 1000) {
-        let _ = s.audit.record(
+        return audit_or_500(
+            &s,
             &rid,
             "keyboard.type",
             json!({"text_len": text.len()}),
-            "deny",
             "rate_limited",
-        );
-        return err(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "slow down".into(),
-            true,
-            &rid,
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "slow down".into(),
+                true,
+                &rid,
+            ),
         );
     }
     match s.input.type_text(text) {
@@ -537,16 +617,14 @@ async fn type_text(State(s): State<Shared>, body: axum::body::Bytes) -> Response
             }
             Json(json!({"ok": true})).into_response()
         }
-        Err(e) => {
-            let _ = s.audit.record(
-                &rid,
-                "keyboard.type",
-                json!({"text_len": text.len()}),
-                "deny",
-                &e,
-            );
-            err(StatusCode::BAD_GATEWAY, "input_failed", e, false, &rid)
-        }
+        Err(e) => audit_or_500(
+            &s,
+            &rid,
+            "keyboard.type",
+            json!({"text_len": text.len()}),
+            &e.clone(),
+            err(StatusCode::BAD_GATEWAY, "input_failed", e, false, &rid),
+        ),
     }
 }
 
@@ -582,7 +660,7 @@ async fn press(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
             &s,
             &rid,
             "keyboard.press",
-            json!({"key": key}),
+            json!({"key": key, "modifiers": mods}),
             "capability not granted",
         );
     }
@@ -597,19 +675,19 @@ async fn press(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
         );
     }
     if !rate_hit(&s.input_hits, 10, 1000) {
-        let _ = s.audit.record(
+        return audit_or_500(
+            &s,
             &rid,
             "keyboard.press",
-            json!({"key": key}),
-            "deny",
+            json!({"key": key, "modifiers": mods}),
             "rate_limited",
-        );
-        return err(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "slow down".into(),
-            true,
-            &rid,
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "slow down".into(),
+                true,
+                &rid,
+            ),
         );
     }
     match s.input.press(key, &mods) {
@@ -645,14 +723,14 @@ async fn press(State(s): State<Shared>, body: axum::body::Bytes) -> Response {
                     "unknown key",
                 );
             }
-            let _ = s.audit.record(
+            audit_or_500(
+                &s,
                 &rid,
                 "keyboard.press",
                 json!({"key": key, "modifiers": mods}),
-                "deny",
-                &e,
-            );
-            err(StatusCode::BAD_GATEWAY, "input_failed", e, false, &rid)
+                &e.clone(),
+                err(StatusCode::BAD_GATEWAY, "input_failed", e, false, &rid),
+            )
         }
     }
 }
